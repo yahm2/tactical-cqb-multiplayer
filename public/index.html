@@ -13,6 +13,7 @@
 #hud{position:fixed;inset:0;z-index:20;pointer-events:none;display:none}.glass{background:var(--glass);border:1px solid var(--line);backdrop-filter:blur(8px);box-shadow:0 10px 30px rgba(0,0,0,.28)}
 #top{position:absolute;left:50%;top:16px;transform:translateX(-50%);display:grid;grid-template-columns:180px 120px 180px;align-items:center;gap:7px;direction:ltr}.playerBox{padding:10px 12px;border-radius:9px}.pname{font-size:10px;letter-spacing:1.4px;color:#94a5af}.bar{height:6px;background:#192127;margin-top:7px;overflow:hidden}.bar>div{height:100%;width:100%;transition:width .12s}.me .bar>div{background:var(--green)}.enemy .bar>div{background:var(--red)}.score{font:900 22px Consolas,monospace;margin-top:4px}.centerBox{text-align:center;padding:9px;border-radius:9px}.roomMini{font:10px Consolas,monospace;color:#83949f}.ping{font:11px Consolas,monospace;margin-top:4px;color:#cbd5da}
 #ammoBox{position:absolute;right:22px;bottom:20px;text-align:right;direction:ltr}.weapon{font-size:10px;letter-spacing:1.6px;color:#8fa1ac}.ammo{font:900 42px Consolas,monospace;line-height:1}.ammo span{font-size:18px;color:#7e8e99}.mode{font-size:10px;color:#a3b1b9;margin-top:3px}
+#audioControls{position:absolute;right:18px;top:105px;display:flex;gap:8px;align-items:center;padding:8px 10px;border-radius:8px;pointer-events:auto;font-size:11px}#audioControls button{padding:5px 8px}#volumeInput{width:90px}
 #tips{position:absolute;left:18px;bottom:18px;padding:9px 11px;border-radius:8px;font-size:10px;color:#9aabb5;direction:ltr}
 #cross{--g:7px;position:absolute;left:50%;top:50%;width:44px;height:44px;transform:translate(-50%,-50%)}.ch{position:absolute;background:#f6f9fb;border-radius:2px;box-shadow:0 0 3px #000}.t,.b{width:2px;height:8px;left:21px}.t{top:calc(22px - var(--g) - 8px)}.b{top:calc(22px + var(--g))}.l,.r{width:8px;height:2px;top:21px}.l{left:calc(22px - var(--g) - 8px)}.r{left:calc(22px + var(--g))}.dot{position:absolute;width:3px;height:3px;border-radius:50%;background:#fff;left:20.5px;top:20.5px}
 #hit{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-weight:900;opacity:0;text-shadow:0 2px 8px #000}#message{position:absolute;left:50%;top:58%;transform:translate(-50%,-50%);font:900 14px Consolas,monospace;opacity:0;text-shadow:0 3px 12px #000}.countdown{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);font:900 90px Arial;opacity:0;text-shadow:0 0 35px rgba(255,255,255,.2)}
@@ -57,14 +58,17 @@
       <div class="bar"><div id="enemyHp"></div></div>
     </div>
   </div>
-  <div id="ammoBox"><div class="weapon">MK18 · 5.56</div><div id="ammo" class="ammo">30 <span>/ 120</span></div><div id="mode" class="mode">AUTO</div></div>
-  <div id="tips" class="glass">WASD MOVE · SHIFT SPRINT · RMB ADS · R RELOAD · B FIRE MODE</div>
+  <div id="audioControls" class="glass"><button id="muteBtn" aria-label="השתק צלילים">SOUND ON</button><label for="volumeInput">עוצמה</label><input id="volumeInput" type="range" min="0" max="100" value="55" aria-label="עוצמת הצלילים"></div>
+  <div id="ammoBox"><div class="weapon">M16A2 · 5.56</div><div id="ammo" class="ammo">30 <span>/ 120</span></div><div id="mode" class="mode">AUTO</div></div>
+  <div id="tips" class="glass">WASD MOVE · SHIFT SPRINT · RMB ADS · R RELOAD · B FIRE MODE · M MUTE · ESC PAUSE</div>
   <div id="cross"><div class="ch t"></div><div class="ch b"></div><div class="ch l"></div><div class="ch r"></div><div class="dot"></div></div>
   <div id="hit">✕</div><div id="message"></div><div id="countdown" class="countdown"></div><div id="death">ELIMINATED</div><div id="vignette"></div>
 </div>
 
 <script type="module">
 import * as THREE from 'three';
+import {GameAudio} from './audio.js';
+const gameAudio=new GameAudio();
 
 /* ---------- DOM ---------- */
 const $=id=>document.getElementById(id);
@@ -113,6 +117,7 @@ function handleMessage(msg){
     enterBtn.style.display='block';
     return;
   }
+  if(msg.type==='footstep'){if(msg.playerId!==selfId)gameAudio.step(msg.position,msg.sprinting);return;}
   if(msg.type==='state'){
     if(msg.player.id!==selfId)addOrUpdateRemote(msg.player,false);return;
   }
@@ -130,12 +135,12 @@ function handleMessage(msg){
   if(msg.type==='kill'){
     if(msg.killerId===selfId){local.score=msg.killerScore;showMessage('ELIMINATION +1','#9ce36b',1000);}
     const killer=remotePlayers.get(msg.killerId);if(killer)killer.score=msg.killerScore;
-    if(msg.victimId===selfId){local.alive=false;deathEl.style.display='grid';}
+    if(msg.victimId===selfId){local.alive=false;lifeVersion++;firing=false;aiming=false;reloading=false;player.velocity.set(0,0,0);respawnAt=msg.respawnAt||Date.now()+2500;deathEl.style.display='grid';}
     const victim=remotePlayers.get(msg.victimId);if(victim){victim.alive=false;victim.group.visible=false;}
     updateHUD();return;
   }
   if(msg.type==='respawn'){
-    if(msg.player.id===selfId){local.alive=true;local.hp=msg.player.hp;player.position.set(msg.player.x,0,msg.player.z);yaw=msg.player.yaw;deathEl.style.display='none';}
+    if(msg.player.id===selfId){lifeVersion++;local.alive=true;local.hp=msg.player.hp;player.position.set(msg.player.x,0,msg.player.z);player.velocity.set(0,0,0);yaw=msg.player.yaw;pitch=0;recoil=0;recoilYaw=0;kick=0;firing=false;aiming=false;reloading=false;ammo=30;reserve=120;stepDistance=0;local.walk=0;local.moveAmount=0;for(const key of Object.keys(keys))keys[key]=false;mag.position.y=mag.userData.restY;deathEl.style.display='none';updateMovement(0);updateCamera(0);showMessage('חזרת לנקודת ההתחלה','#9ce36b',1200);}
     else{const r=addOrUpdateRemote(msg.player,true);r.alive=true;r.group.visible=true;}
     updateHUD();return;
   }
@@ -174,7 +179,9 @@ for(let z=-2;z>-65;z-=18){const p=new THREE.PointLight(0xff473e,9,8,2);p.positio
 /* ---------- Local player ---------- */
 const player={position:new THREE.Vector3(0,0,8),velocity:new THREE.Vector3(),radius:.36,eye:1.72};
 const local={hp:100,score:0,alive:true,moveAmount:0,walk:0,matchLive:false};let yaw=Math.PI,pitch=0,aiming=false,firing=false,reloading=false,fireMode='AUTO',ammo=30,reserve=120,lastShot=0,recoil=0,recoilYaw=0,kick=0;
-const keys={};
+const keys={};let lifeVersion=0,stepDistance=0,respawnAt=0;
+$('muteBtn').onclick=()=>{$('muteBtn').textContent=gameAudio.toggleMute()?'SOUND OFF':'SOUND ON';};
+$('volumeInput').oninput=e=>gameAudio.setVolume(Number(e.target.value)/100);
 
 function blocked(x,z){const r=player.radius;for(const c of colliders){const cx=Math.max(c.minX,Math.min(x,c.maxX)),cz=Math.max(c.minZ,Math.min(z,c.maxZ));const dx=x-cx,dz=z-cz;if(dx*dx+dz*dz<r*r)return true;}return false;}
 function moveWithCollision(dx,dz){const nx=player.position.x+dx;if(!blocked(nx,player.position.z))player.position.x=nx;else player.velocity.x*=.1;const nz=player.position.z+dz;if(!blocked(player.position.x,nz))player.position.z=nz;else player.velocity.z*=.1;}
@@ -182,14 +189,24 @@ function moveWithCollision(dx,dz){const nx=player.position.x+dx;if(!blocked(nx,p
 /* ---------- Local weapon ---------- */
 const weapon=new THREE.Group();camera.add(weapon);const gunBlack=new THREE.MeshStandardMaterial({color:0x0a0c0e,roughness:.28,metalness:.85});const gunTan=new THREE.MeshStandardMaterial({color:0x625c4c,roughness:.5,metalness:.18});
 function wb(w,h,d,mat,x,y,z){const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat);m.position.set(x,y,z);m.castShadow=true;weapon.add(m);return m;}
-wb(.18,.17,.72,gunBlack,0,0,-.2);wb(.2,.14,.55,gunTan,0,-.01,-.78);wb(.05,.05,.55,gunBlack,0,.01,-1.32);const mag=wb(.12,.31,.16,gunBlack,0,-.22,-.05);mag.rotation.x=-.13;const optic=new THREE.Mesh(new THREE.CylinderGeometry(.075,.075,.17,20),gunBlack);optic.rotation.x=Math.PI/2;optic.position.set(0,.19,-.28);weapon.add(optic);
-const muzzle=new THREE.Object3D();muzzle.position.set(0,.01,-1.64);weapon.add(muzzle);const flash=new THREE.Mesh(new THREE.ConeGeometry(.07,.27,8),new THREE.MeshBasicMaterial({color:0xffc06a}));flash.rotation.x=-Math.PI/2;flash.position.z=-.13;flash.visible=false;muzzle.add(flash);const flashLight=new THREE.PointLight(0xff9840,0,5,2);muzzle.add(flashLight);
-const hip=new THREE.Vector3(.36,-.32,-.67),ads=new THREE.Vector3(0,-.19,-.49),sprintPos=new THREE.Vector3(.5,-.44,-.52);weapon.position.copy(hip);
+wb(.18,.17,.72,gunBlack,0,0,-.2);wb(.2,.14,.55,gunTan,0,-.01,-.78);wb(.05,.05,.55,gunBlack,0,.01,-1.32);let mag=wb(.12,.31,.16,gunBlack,0,-.22,-.05);mag.rotation.x=-.13;mag.userData.restY=mag.position.y;const optic=new THREE.Mesh(new THREE.CylinderGeometry(.075,.075,.17,20),gunBlack);optic.rotation.x=Math.PI/2;optic.position.set(0,.19,-.28);weapon.add(optic);
+const fallbackParts=[...weapon.children];
+const muzzle=new THREE.Object3D();muzzle.position.set(0,.020,-.665);weapon.add(muzzle);const flash=new THREE.Mesh(new THREE.ConeGeometry(.07,.27,8),new THREE.MeshBasicMaterial({color:0xffc06a}));flash.rotation.x=-Math.PI/2;flash.position.z=-.13;flash.visible=false;muzzle.add(flash);const flashLight=new THREE.PointLight(0xff9840,0,5,2);muzzle.add(flashLight);
+const hip=new THREE.Vector3(.24,-.24,-.55),ads=new THREE.Vector3(0,-.11,-.45),sprintPos=new THREE.Vector3(.35,-.34,-.48);weapon.position.copy(hip);
+
+let rifleTemplate=null;
+const rifleReady=fetch('/assets/models/m16.json').then(r=>{if(!r.ok)throw new Error('Model unavailable');return r.json();}).then(data=>{
+  rifleTemplate=new THREE.ObjectLoader().parse(data);const model=rifleTemplate.clone(true);model.scale.setScalar(.58);model.getObjectByName('stock').visible=false;weapon.add(model);
+  for(const part of fallbackParts){weapon.remove(part);part.geometry?.dispose();}
+  mag=model.getObjectByName('magazine');mag.userData.restY=mag.position.y;
+  for(const r of remotePlayers.values())installRemoteRifle(r);
+}).catch(error=>console.warn('Using fallback rifle',error));
+function installRemoteRifle(r){if(!rifleTemplate||r.modelLoaded)return;r.gun.remove(r.placeholder);const model=rifleTemplate.clone(true);model.scale.setScalar(.52);r.gun.add(model);r.modelLoaded=true;}
 
 /* ---------- Remote players ---------- */
 const remotePlayers=new Map();let remoteHitMeshes=[];
 function createRemote(p){
-  const g=new THREE.Group();const primary=new THREE.MeshStandardMaterial({color:p.slot===0?0x477a2e:0x6e2b2b,roughness:.65,metalness:.12});const black=new THREE.MeshStandardMaterial({color:0x111416,roughness:.48,metalness:.48});
+  const g=new THREE.Group();const primary=new THREE.MeshStandardMaterial({color:p.slot===1?0x477a2e:0x6e2b2b,roughness:.65,metalness:.12});const black=new THREE.MeshStandardMaterial({color:0x111416,roughness:.48,metalness:.48});
   const torso=new THREE.Mesh(new THREE.BoxGeometry(.58,.85,.32),primary);torso.position.y=1.15;torso.castShadow=true;g.add(torso);
   const head=new THREE.Mesh(new THREE.SphereGeometry(.22,16,12),primary);head.position.y=1.82;head.castShadow=true;g.add(head);
   const legs=[];for(const sx of [-.17,.17]){const l=new THREE.Mesh(new THREE.BoxGeometry(.18,.7,.2),black);l.position.set(sx,.47,0);l.castShadow=true;g.add(l);legs.push(l);}
@@ -197,7 +214,7 @@ function createRemote(p){
   const rm=new THREE.PointLight(0xff963f,0,4,2);rm.position.set(0,0,-.78);gun.add(rm);const rf=new THREE.Mesh(new THREE.ConeGeometry(.055,.22,7),new THREE.MeshBasicMaterial({color:0xffc36a}));rf.rotation.x=-Math.PI/2;rf.position.set(0,0,-.82);rf.visible=false;gun.add(rf);
   for(const [m,zone] of [[torso,'body'],[head,'head']]){m.userData.remoteId=p.id;m.userData.zone=zone;}
   g.position.set(p.x,0,p.z);g.rotation.y=p.yaw;scene.add(g);
-  const r={id:p.id,name:p.name,group:g,torso,head,gun,flash:rf,flashLight:rm,hp:p.hp,score:p.score,alive:p.alive,targetPos:new THREE.Vector3(p.x,0,p.z),targetYaw:p.yaw,targetPitch:p.pitch,aiming:p.aiming};
+  const r={id:p.id,name:p.name,group:g,torso,head,gun,flash:rf,flashLight:rm,hp:p.hp,score:p.score,alive:p.alive,targetPos:new THREE.Vector3(p.x,0,p.z),targetYaw:p.yaw,targetPitch:p.pitch,aiming:p.aiming,placeholder:gm};installRemoteRifle(r);
   remotePlayers.set(p.id,r);rebuildRemoteHits();return r;
 }
 function rebuildRemoteHits(){remoteHitMeshes=[];for(const r of remotePlayers.values())remoteHitMeshes.push(r.torso,r.head);}
@@ -207,7 +224,7 @@ function addOrUpdateRemote(p,snap=false){
   if(snap){r.group.position.copy(r.targetPos);r.group.rotation.y=r.targetYaw;}
   enemyNameEl.textContent=p.name.toUpperCase();updateHUD();return r;
 }
-function remoteMuzzle(r){r.flash.visible=true;r.flashLight.intensity=100;setTimeout(()=>{r.flash.visible=false;r.flashLight.intensity=0},32);}
+function remoteMuzzle(r){gameAudio.shot({x:r.group.position.x,y:1.4,z:r.group.position.z});r.flash.visible=true;r.flashLight.intensity=100;setTimeout(()=>{r.flash.visible=false;r.flashLight.intensity=0},32);}
 
 /* ---------- UI ---------- */
 function updateHUD(){myHpEl.style.width=`${Math.max(0,local.hp)}%`;myScoreEl.textContent=local.score;const r=opponentId?remotePlayers.get(opponentId):null;enemyHpEl.style.width=`${r?Math.max(0,r.hp):0}%`;enemyScoreEl.textContent=r?.score??0;ammoEl.innerHTML=`${ammo} <span>/ ${reserve}</span>`;modeEl.textContent=fireMode;}
@@ -216,6 +233,7 @@ function showHit(color){hitEl.style.color=color;hitEl.style.opacity='1';setTimeo
 function damageFlash(){document.getElementById('vignette').style.background='radial-gradient(circle,transparent 42%,rgba(140,0,0,.65))';setTimeout(()=>document.getElementById('vignette').style.background='radial-gradient(circle,transparent 52%,rgba(0,0,0,.42))',120);}
 function beginCountdown(startAt){overlay.style.display='none';hud.style.display='block';local.matchLive=false;const tick=()=>{const left=startAt-Date.now();if(left<=0){countdownEl.textContent='GO';countdownEl.style.opacity='1';local.matchLive=true;setTimeout(()=>countdownEl.style.opacity='0',450);return;}countdownEl.style.opacity='1';countdownEl.textContent=Math.ceil(left/1000);requestAnimationFrame(tick);};tick();}
 function captureMouse(){
+  gameAudio.init();
   const request=renderer.domElement.requestPointerLock();
   request?.catch?.(()=>showMessage('לחץ על המשחק כדי להמשיך','#ffbd6a',3000));
 }
@@ -230,23 +248,23 @@ document.addEventListener('pointerlockchange',()=>{
 
 /* ---------- Input ---------- */
 document.addEventListener('mousemove',e=>{if(document.pointerLockElement!==renderer.domElement||!local.alive)return;const s=aiming?.00095:.0017;yaw-=e.movementX*s;pitch-=e.movementY*s;pitch=THREE.MathUtils.clamp(pitch,-1.25,1.25);});
-document.addEventListener('keydown',e=>{keys[e.code]=true;if(e.repeat)return;if(e.code==='KeyR')reload();if(e.code==='KeyB'){fireMode=fireMode==='AUTO'?'SEMI':'AUTO';updateHUD();}});document.addEventListener('keyup',e=>keys[e.code]=false);
+document.addEventListener('keydown',e=>{keys[e.code]=true;if(e.repeat)return;if(e.code==='KeyM'){$('muteBtn').click();}if(e.code==='KeyR')reload();if(e.code==='KeyB'){fireMode=fireMode==='AUTO'?'SEMI':'AUTO';updateHUD();}});document.addEventListener('keyup',e=>keys[e.code]=false);
 document.addEventListener('mousedown',e=>{if(document.pointerLockElement!==renderer.domElement)return;if(e.button===2)aiming=true;if(e.button===0){firing=true;if(fireMode==='SEMI')shoot();}});document.addEventListener('mouseup',e=>{if(e.button===2)aiming=false;if(e.button===0)firing=false;});document.addEventListener('contextmenu',e=>e.preventDefault());
 
 /* ---------- Reload ---------- */
-function reload(){if(reloading||ammo===30||reserve<=0||!local.alive)return;reloading=true;firing=false;showMessage('RELOADING','#d8e3e9',900);const y=mag.position.y;const t0=performance.now();function a(){const t=(performance.now()-t0)/1200;if(t<1){mag.position.y=y-Math.sin(Math.PI*t)*.23;requestAnimationFrame(a);}else{mag.position.y=y;const n=Math.min(30-ammo,reserve);ammo+=n;reserve-=n;reloading=false;updateHUD();}}a();}
+function reload(){if(reloading||ammo===30||reserve<=0||!local.alive)return;reloading=true;firing=false;showMessage('RELOADING','#d8e3e9',900);gameAudio.click();const version=lifeVersion,mesh=mag,y=mag.userData.restY;const t0=performance.now();function a(){if(version!==lifeVersion||!local.alive){mesh.position.y=y;return;}const t=(performance.now()-t0)/1200;if(t<1){mesh.position.y=y-Math.sin(Math.PI*t)*.23;requestAnimationFrame(a);}else{mesh.position.y=y;gameAudio.click();const n=Math.min(30-ammo,reserve);ammo+=n;reserve-=n;reloading=false;updateHUD();}}a();}
 
 /* ---------- Shooting ---------- */
 const raycaster=new THREE.Raycaster();
 function shoot(){
-  if(!local.alive||!local.matchLive||reloading)return;const now=performance.now(),interval=fireMode==='AUTO'?86:145;if(now-lastShot<interval)return;lastShot=now;if(ammo<=0){reload();return;}ammo--;send({type:'shoot'});flash.visible=true;flashLight.intensity=120;setTimeout(()=>{flash.visible=false;flashLight.intensity=0},28);recoil+=aiming?.011:.019;recoilYaw+=(Math.random()-.5)*(aiming?.005:.012);kick+=aiming?.03:.055;
+  if(!local.alive||!local.matchLive||reloading)return;const now=performance.now(),interval=fireMode==='AUTO'?86:145;if(now-lastShot<interval)return;lastShot=now;if(ammo<=0){reload();return;}ammo--;gameAudio.shot();send({type:'shoot'});flash.visible=true;flashLight.intensity=120;setTimeout(()=>{flash.visible=false;flashLight.intensity=0},28);recoil+=aiming?.011:.019;recoilYaw+=(Math.random()-.5)*(aiming?.005:.012);kick+=aiming?.03:.055;
   const spread=(aiming?.0004:.0014)+local.moveAmount*.002;raycaster.setFromCamera(new THREE.Vector2((Math.random()-.5)*spread,(Math.random()-.5)*spread),camera);const hits=raycaster.intersectObjects([...remoteHitMeshes,...worldMeshes],false);const h=hits[0];if(h?.object.userData?.remoteId){const id=h.object.userData.remoteId;const r=remotePlayers.get(id);if(r?.alive)send({type:'hit',targetId:id,zone:h.object.userData.zone});}
   updateHUD();
 }
 
 /* ---------- Gameplay update ---------- */
 function updateMovement(dt){
-  if(!local.alive)return;const f=(keys.KeyW?1:0)-(keys.KeyS?1:0),s=(keys.KeyD?1:0)-(keys.KeyA?1:0),sprinting=keys.ShiftLeft&&keys.KeyW&&!aiming;const speed=sprinting?6.6:aiming?2.45:4.25;const forward=new THREE.Vector3(-Math.sin(yaw),0,-Math.cos(yaw)),right=new THREE.Vector3(Math.cos(yaw),0,-Math.sin(yaw)),desired=new THREE.Vector3().addScaledVector(forward,f).addScaledVector(right,s);if(desired.lengthSq()>1)desired.normalize();desired.multiplyScalar(speed);player.velocity.x=THREE.MathUtils.damp(player.velocity.x,desired.x,(f||s)?12:8,dt);player.velocity.z=THREE.MathUtils.damp(player.velocity.z,desired.z,(f||s)?12:8,dt);moveWithCollision(player.velocity.x*dt,player.velocity.z*dt);local.moveAmount=Math.min(1,Math.hypot(player.velocity.x,player.velocity.z)/speed);if(local.moveAmount>.02)local.walk+=dt*(sprinting?12:8);const bob=Math.sin(local.walk*2)*(sprinting?.045:.022)*local.moveAmount;camera.position.set(player.position.x,player.eye+bob,player.position.z);camera.fov=THREE.MathUtils.damp(camera.fov,aiming?52:sprinting?79:73,7,dt);camera.updateProjectionMatrix();cross.style.setProperty('--g',`${aiming?2:7+local.moveAmount*(sprinting?7:3)}px`);
+  if(!local.alive)return;const f=(keys.KeyW?1:0)-(keys.KeyS?1:0),s=(keys.KeyD?1:0)-(keys.KeyA?1:0),sprinting=keys.ShiftLeft&&keys.KeyW&&!aiming;const speed=sprinting?6.6:aiming?2.45:4.25;const forward=new THREE.Vector3(-Math.sin(yaw),0,-Math.cos(yaw)),right=new THREE.Vector3(Math.cos(yaw),0,-Math.sin(yaw)),desired=new THREE.Vector3().addScaledVector(forward,f).addScaledVector(right,s);if(desired.lengthSq()>1)desired.normalize();desired.multiplyScalar(speed);player.velocity.x=THREE.MathUtils.damp(player.velocity.x,desired.x,(f||s)?12:8,dt);player.velocity.z=THREE.MathUtils.damp(player.velocity.z,desired.z,(f||s)?12:8,dt);const beforeX=player.position.x,beforeZ=player.position.z;moveWithCollision(player.velocity.x*dt,player.velocity.z*dt);const traveled=Math.hypot(player.position.x-beforeX,player.position.z-beforeZ);if(local.matchLive){stepDistance+=traveled;if(stepDistance>(sprinting?1.75:1.65)){stepDistance=0;gameAudio.step(null,sprinting);send({type:'footstep',sprinting});}}local.moveAmount=Math.min(1,Math.hypot(player.velocity.x,player.velocity.z)/speed);if(local.moveAmount>.02)local.walk+=dt*(sprinting?12:8);const bob=Math.sin(local.walk*2)*(sprinting?.045:.022)*local.moveAmount;camera.position.set(player.position.x,player.eye+bob,player.position.z);camera.fov=THREE.MathUtils.damp(camera.fov,aiming?52:sprinting?79:73,7,dt);camera.updateProjectionMatrix();cross.style.setProperty('--g',`${aiming?2:7+local.moveAmount*(sprinting?7:3)}px`);
 }
 function updateCamera(dt){recoil=THREE.MathUtils.damp(recoil,0,11,dt);recoilYaw=THREE.MathUtils.damp(recoilYaw,0,13,dt);camera.rotation.y=yaw+recoilYaw;camera.rotation.x=pitch+recoil;}
 function updateWeapon(dt){kick=THREE.MathUtils.damp(kick,0,16,dt);const sprinting=keys.ShiftLeft&&keys.KeyW&&!aiming,target=sprinting?sprintPos:aiming?ads:hip;weapon.position.x=THREE.MathUtils.damp(weapon.position.x,target.x,13,dt);weapon.position.y=THREE.MathUtils.damp(weapon.position.y,target.y,13,dt);weapon.position.z=THREE.MathUtils.damp(weapon.position.z,target.z+kick,14,dt);weapon.rotation.y=THREE.MathUtils.damp(weapon.rotation.y,sprinting?.28:0,10,dt);}
@@ -256,8 +274,9 @@ let lastStateSend=0;
 function sendState(now){if(!selfId||!local.alive||now-lastStateSend<40)return;lastStateSend=now;send({type:'state',x:player.position.x,y:player.eye,z:player.position.z,yaw,pitch,aiming,crouched:false});}
 function ping(now){if(!selfId||now-lastPingSent<2000)return;lastPingSent=now;send({type:'ping',clientTime:Date.now()});}
 
+const audioDirection=new THREE.Vector3();
 const clock=new THREE.Clock();
-function animate(){requestAnimationFrame(animate);const dt=Math.min(clock.getDelta(),.033),now=performance.now();if(document.pointerLockElement===renderer.domElement){updateMovement(dt);updateCamera(dt);updateWeapon(dt);if(firing&&fireMode==='AUTO')shoot();sendState(now);ping(now);}updateRemotes(dt);renderer.render(scene,camera);}animate();
+function animate(){requestAnimationFrame(animate);const dt=Math.min(clock.getDelta(),.033),now=performance.now();if(document.pointerLockElement===renderer.domElement){updateMovement(dt);updateCamera(dt);updateWeapon(dt);if(firing&&fireMode==='AUTO')shoot();sendState(now);ping(now);}updateRemotes(dt);camera.getWorldDirection(audioDirection);gameAudio.listener(camera.position,audioDirection);if(!local.alive)deathEl.textContent=`ELIMINATED — חוזר בעוד ${Math.max(1,Math.ceil((respawnAt-Date.now())/1000))}`;renderer.render(scene,camera);}animate();
 
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
 updateHUD();

@@ -398,13 +398,7 @@ function handleShot(socket, message) {
     hp: target.hp
   });
 
-  broadcast(room, {
-    type: "shot",
-    playerId: player.id,
-    targetId: target.id,
-    zone,
-    hit: true
-  });
+
 
   if (target.hp <= 0) {
     target.alive = false;
@@ -415,6 +409,7 @@ function handleShot(socket, message) {
 
     broadcast(room, {
       type: "kill",
+    respawnAt: Date.now() + 2500,
       killerId: player.id,
       victimId: target.id,
       killerScore: player.score,
@@ -510,6 +505,19 @@ wss.on("connection", socket => {
         );
         break;
 
+      case "footstep": {
+        const result = getRoomBySocket(socket);
+        if (result && result.player.alive) {
+          const now = Date.now();
+          if (now - (result.player.lastStepAt || 0) >= 120) {
+            result.player.lastStepAt = now;
+            const { x, z } = result.player.state;
+            broadcast(result.room, { type: "footstep", playerId: result.player.id,
+              position: { x, y: 0, z }, sprinting: Boolean(message.sprinting) }, result.player.id);
+          }
+        }
+        break;
+      }
       case "shoot":
       case "hit":
       case "shot":

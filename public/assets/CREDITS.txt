@@ -1,0 +1,17 @@
+M16 rifle recordings
+Source: https://freesound.org/people/qubodup/sounds/187677/
+Author: qubodup; extracted from US Government agency footage.
+License: CC0 / Public Domain.
+Adaptation: three short mono samples, trimmed and normalized.
+
+Footstep recordings
+Source: https://opengameart.org/content/footsteps-0
+Author: GboxMikeFozzy.
+License: CC0.
+Adaptation: first three samples converted to mono PCM WAV.
+
+M16A2-style model
+Original procedural geometry created for tactical-cqb-multiplayer.
+No third-party weapon model is included.
+
+CC0 license: https://creativecommons.org/publicdomain/zero/1.0/
