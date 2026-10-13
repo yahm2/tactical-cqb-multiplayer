@@ -173,7 +173,7 @@ for(let z=-2;z>-65;z-=18){const p=new THREE.PointLight(0xff473e,9,8,2);p.positio
 
 /* ---------- Local player ---------- */
 const player={position:new THREE.Vector3(0,0,8),velocity:new THREE.Vector3(),radius:.36,eye:1.72};
-const local={hp:100,score:0,alive:true};let yaw=Math.PI,pitch=0,aiming=false,firing=false,reloading=false,fireMode='AUTO',ammo=30,reserve=120,lastShot=0,recoil=0,recoilYaw=0,kick=0,moveAmount=0,walk=0,matchLive=false;
+const local={hp:100,score:0,alive:true,moveAmount:0,walk:0,matchLive:false};let yaw=Math.PI,pitch=0,aiming=false,firing=false,reloading=false,fireMode='AUTO',ammo=30,reserve=120,lastShot=0,recoil=0,recoilYaw=0,kick=0;
 const keys={};
 
 function blocked(x,z){const r=player.radius;for(const c of colliders){const cx=Math.max(c.minX,Math.min(x,c.maxX)),cz=Math.max(c.minZ,Math.min(z,c.maxZ));const dx=x-cx,dz=z-cz;if(dx*dx+dz*dz<r*r)return true;}return false;}
@@ -215,7 +215,18 @@ function showMessage(text,color='#fff',ms=700){messageEl.textContent=text;messag
 function showHit(color){hitEl.style.color=color;hitEl.style.opacity='1';setTimeout(()=>hitEl.style.opacity='0',90);}
 function damageFlash(){document.getElementById('vignette').style.background='radial-gradient(circle,transparent 42%,rgba(140,0,0,.65))';setTimeout(()=>document.getElementById('vignette').style.background='radial-gradient(circle,transparent 52%,rgba(0,0,0,.42))',120);}
 function beginCountdown(startAt){overlay.style.display='none';hud.style.display='block';local.matchLive=false;const tick=()=>{const left=startAt-Date.now();if(left<=0){countdownEl.textContent='GO';countdownEl.style.opacity='1';local.matchLive=true;setTimeout(()=>countdownEl.style.opacity='0',450);return;}countdownEl.style.opacity='1';countdownEl.textContent=Math.ceil(left/1000);requestAnimationFrame(tick);};tick();}
-enterBtn.addEventListener('click',()=>{if(!matchStartAt)return;renderer.domElement.requestPointerLock();beginCountdown(matchStartAt);});
+function captureMouse(){
+  const request=renderer.domElement.requestPointerLock();
+  request?.catch?.(()=>showMessage('לחץ על המשחק כדי להמשיך','#ffbd6a',3000));
+}
+enterBtn.addEventListener('click',()=>{if(!matchStartAt)return;captureMouse();beginCountdown(matchStartAt);});
+renderer.domElement.addEventListener('click',()=>{if(selfId&&hud.style.display==='block'&&document.pointerLockElement!==renderer.domElement)captureMouse();});
+document.addEventListener('pointerlockchange',()=>{
+  if(document.pointerLockElement===renderer.domElement)return;
+  firing=false;aiming=false;player.velocity.set(0,0,0);
+  for(const key of Object.keys(keys))keys[key]=false;
+  if(hud.style.display==='block')showMessage('לחץ על המשחק כדי להמשיך','#ffbd6a',3000);
+});
 
 /* ---------- Input ---------- */
 document.addEventListener('mousemove',e=>{if(document.pointerLockElement!==renderer.domElement||!local.alive)return;const s=aiming?.00095:.0017;yaw-=e.movementX*s;pitch-=e.movementY*s;pitch=THREE.MathUtils.clamp(pitch,-1.25,1.25);});
