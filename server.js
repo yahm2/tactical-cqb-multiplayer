@@ -1,580 +1,582 @@
-import express from "express";
-import http from "http";
-import crypto from "crypto";
-import { WebSocketServer, WebSocket } from "ws";
+import express from 'express';
+import http from 'http';
+import crypto from 'crypto';
+import { WebSocketServer, WebSocket } from 'ws';
 
 const app = express();
 const server = http.createServer(app);
+const wss = new WebSocketServer({ server, path: '/ws' });
 
-const PORT = process.env.PORT || 3000;
+app.use(express.static('public'));
 
-app.use(express.static("public"));
+const rooms = new Map();
+const clients = new Map();
 
-app.get("/health", (req, res) => {
+const MAX_PLAYERS = 2;
+const ROUND_END_MS = 2200;
+const ROUND_COUNTDOWN_MS = 3200;
+const BODY_DAMAGE = 34;
+const HEAD_DAMAGE = 100;
+const MAX_ROOM_AGE_MS = 12 * 60 * 60 * 1000;
+
+// The outdoor industrial map runs from approximately z=34 to z=-70.
+const SPAWNS = [
+  { x: -7.5, y: 1.72, z: 29, yaw: 0 },
+  { x: 7.5, y: 1.72, z: -63, yaw: Math.PI }
+];
+
+app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    rooms: rooms.size
+    rooms: rooms.size,
+    clients: wss.clients.size,
+    uptimeSeconds: Math.floor(process.uptime())
   });
 });
 
-const wss = new WebSocketServer({
-  server,
-  path: "/ws"
-});
-
-const rooms = new Map();
-
-/*
-room = {
-  code,
-  players: Map<playerId, player>,
-  createdAt
+function makeId() {
+  return crypto.randomBytes(8).toString('hex');
 }
 
-player = {
-  id,
-  socket,
-  slot,
-  hp,
-  score,
-  kills,
-  deaths,
-  alive,
-  state
-}
-*/
+function makeRoomCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
-function createId() {
-  return crypto.randomBytes(8).toString("hex");
-}
+  for (let attempt = 0; attempt < 40; attempt++) {
+    let code = '';
 
-function createRoomCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    for (let index = 0; index < 5; index++) {
+      code += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
 
-  let code = "";
-
-  for (let i = 0; i < 5; i++) {
-    code += chars[
-      Math.floor(
-        Math.random() *
-        chars.length
-      )
-    ];
+    if (!rooms.has(code)) {
+      return code;
+    }
   }
 
-  return code;
+  return crypto.randomBytes(3).toString('hex').toUpperCase();
 }
 
-function getUniqueRoomCode() {
-  let code;
-
-  do {
-    code = createRoomCode();
-  } while (rooms.has(code));
-
-  return code;
-}
-
-function send(socket, data) {
-  if (
-    socket &&
-    socket.readyState === WebSocket.OPEN
-  ) {
-    socket.send(
-      JSON.stringify(data)
-    );
+function safeSend(socket, payload) {
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(payload));
   }
 }
 
-function broadcast(room, data, exceptId = null) {
+function broadcast(room, payload, exceptId = null) {
   for (const [playerId, player] of room.players) {
     if (playerId === exceptId) {
       continue;
     }
 
-    send(player.socket, data);
+    safeSend(player.ws, payload);
   }
 }
 
-function broadcastRoomState(room) {
-  const players = [];
-
-  for (const player of room.players.values()) {
-    players.push({
-      id: player.id,
-      slot: player.slot,
-      hp: player.hp,
-      score: player.score,
-      kills: player.kills,
-      deaths: player.deaths,
-      alive: player.alive
-    });
-  }
-
-  broadcast(room, {
-    type: "roomState",
-    code: room.code,
-    players
-  });
-}
-
-function getRoomBySocket(socket) {
-  for (const room of rooms.values()) {
-    for (const player of room.players.values()) {
-      if (player.socket === socket) {
-        return {
-          room,
-          player
-        };
-      }
-    }
-  }
-
-  return null;
-}
-
-function playerSnapshot(player) {
+function serializePlayer(player) {
   return {
-    id: player.id, name: player.name, slot: player.slot,
-    hp: player.hp, score: player.score, alive: player.alive,
-    ...player.state
+    id: player.id,
+    slot: player.slot,
+    name: player.name,
+    x: player.x,
+    y: player.y,
+    z: player.z,
+    yaw: player.yaw,
+    pitch: player.pitch,
+    aiming: player.aiming,
+    crouched: player.crouched,
+    sprinting: player.sprinting,
+    moving: player.moving,
+    velocityX: player.velocityX,
+    velocityZ: player.velocityZ,
+    hp: player.hp,
+    score: player.score,
+    alive: player.alive,
+    ready: player.ready
   };
 }
 
-function createPlayer(socket, slot, name = "Operator") {
-  return {
-    id: createId(),
-    name: String(name || "Operator").trim().slice(0, 32) || "Operator",
-    socket,
-    slot,
-    hp: 100,
-    score: 0,
-    kills: 0,
-    deaths: 0,
-    alive: true,
-    state: {
-      x: slot === 1 ? -7 : 7,
-      y: 0,
-      z: slot === 1 ? 8 : -58,
-      yaw: slot === 1 ? 0 : Math.PI,
-      pitch: 0,
-      aiming: false,
-      crouched: false,
-      sprinting: false,
-      fireMode: "AUTO"
+function getFreeSlot(room) {
+  const used = new Set(
+    [...room.players.values()].map(player => player.slot)
+  );
+
+  for (let slot = 0; slot < MAX_PLAYERS; slot++) {
+    if (!used.has(slot)) {
+      return slot;
     }
-  };
+  }
+
+  return -1;
 }
 
 function resetPlayer(player) {
+  const spawn = SPAWNS[player.slot];
+
+  player.x = spawn.x;
+  player.y = spawn.y;
+  player.z = spawn.z;
+  player.yaw = spawn.yaw;
+  player.pitch = 0;
+  player.aiming = false;
+  player.crouched = false;
+  player.sprinting = false;
+  player.moving = false;
+  player.velocityX = 0;
+  player.velocityZ = 0;
   player.hp = 100;
   player.alive = true;
+  player.lastShotAt = 0;
 }
 
-function removePlayerFromRoom(room, playerId) {
-  if (!room) return;
+function createPlayer(ws, slot, name = 'Operator') {
+  const player = {
+    id: makeId(),
+    ws,
+    slot,
+    name: String(name || 'Operator').trim().slice(0, 18) || 'Operator',
+    x: 0,
+    y: 1.72,
+    z: 0,
+    yaw: 0,
+    pitch: 0,
+    aiming: false,
+    crouched: false,
+    sprinting: false,
+    moving: false,
+    velocityX: 0,
+    velocityZ: 0,
+    hp: 100,
+    score: 0,
+    alive: true,
+    ready: false,
+    lastStateAt: 0,
+    lastShotAt: 0,
+    lastSeenAt: Date.now()
+  };
 
-  room.players.delete(playerId);
+  resetPlayer(player);
+  return player;
+}
 
-  broadcast(room, {
-    type: "playerLeft",
-    playerId
-  });
-
-  if (room.players.size === 0) {
-    rooms.delete(room.code);
-    return;
+function clearRoomTimer(room) {
+  if (room.roundTimer) {
+    clearTimeout(room.roundTimer);
+    room.roundTimer = null;
   }
-
-  broadcastRoomState(room);
 }
 
-function handleCreateRoom(socket, message) {
-  if (getRoomBySocket(socket)) return;
-  const code = getUniqueRoomCode();
+function createRoom() {
+  const code = makeRoomCode();
 
   const room = {
     code,
     players: new Map(),
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    round: 0,
+    phase: 'waiting',
+    startedAt: 0,
+    roundTimer: null
   };
 
-  const player = createPlayer(
-    socket,
-    1,
-    message.name
-  );
-
-  room.players.set(
-    player.id,
-    player
-  );
-
-  rooms.set(
-    code,
-    room
-  );
-
-  send(socket, {
-    type: "joined",
-    roomCode: code,
-    you: playerSnapshot(player),
-    players: [...room.players.values()].map(playerSnapshot)
-  });
-
-  broadcastRoomState(room);
+  rooms.set(code, room);
+  return room;
 }
 
-function handleJoinRoom(socket, message) {
-  if (getRoomBySocket(socket)) return;
-  const code = String(
-    message.roomCode || message.code || ""
-  )
-    .trim()
-    .toUpperCase();
-
-  const room = rooms.get(code);
-
-  if (!room) {
-    send(socket, {
-      type: "error",
-      message: "ROOM_NOT_FOUND"
-    });
-
+function startRound(room, reason = 'nextRound') {
+  if (!room || room.players.size !== MAX_PLAYERS) {
     return;
   }
 
-  if (room.players.size >= 2) {
-    send(socket, {
-      type: "error",
-      message: "ROOM_FULL"
-    });
+  clearRoomTimer(room);
 
-    return;
+  room.round += 1;
+  room.phase = 'countdown';
+  room.startedAt = Date.now() + ROUND_COUNTDOWN_MS;
+
+  for (const player of room.players.values()) {
+    resetPlayer(player);
   }
-
-  const slot = [...room.players.values()].some(p => p.slot === 1) ? 2 : 1;
-
-  const player = createPlayer(
-    socket,
-    slot,
-    message.name
-  );
-
-  room.players.set(
-    player.id,
-    player
-  );
-
-  send(socket, {
-    type: "joined",
-    roomCode: code,
-    you: playerSnapshot(player),
-    players: [...room.players.values()].map(playerSnapshot)
-  });
 
   broadcast(room, {
-    type: "playerJoined",
-    player: playerSnapshot(player)
-  }, player.id);
+    type: 'roundReset',
+    round: room.round,
+    startAt: room.startedAt,
+    reason,
+    players: [...room.players.values()].map(serializePlayer)
+  });
 
-  broadcastRoomState(room);
+  room.roundTimer = setTimeout(() => {
+    const liveRoom = rooms.get(room.code);
 
-  if (room.players.size === 2) {
-    broadcast(room, {
-      type: "matchCountdown",
-    startAt: Date.now() + 3000
+    if (!liveRoom || liveRoom.players.size !== MAX_PLAYERS) {
+      return;
+    }
+
+    liveRoom.phase = 'live';
+    liveRoom.startedAt = Date.now();
+
+    broadcast(liveRoom, {
+      type: 'roundLive',
+      round: liveRoom.round,
+      startedAt: liveRoom.startedAt
     });
-  }
+  }, ROUND_COUNTDOWN_MS);
 }
 
-function handlePlayerState(socket, message) {
-  const result = getRoomBySocket(socket);
-
-  if (!result) return;
-
-  const { room, player } = result;
-
-  if (!player.alive) {
+function endRound(room, killer, victim) {
+  if (!room || room.phase !== 'live') {
     return;
   }
 
-  const state = message.state || message;
+  room.phase = 'roundEnd';
+  victim.alive = false;
+  victim.hp = 0;
+  killer.score += 1;
 
-  player.state = {
-    x: Number(state.x) || 0,
-    y: Number(state.y) || 0,
-    z: Number(state.z) || 0,
-    yaw: Number(state.yaw) || 0,
-    pitch: Number(state.pitch) || 0,
-    aiming: Boolean(state.aiming),
-    crouched: Boolean(state.crouched),
-    sprinting: Boolean(state.sprinting),
-    fireMode:
-      state.fireMode === "SEMI"
-        ? "SEMI"
-        : "AUTO"
-  };
+  broadcast(room, {
+    type: 'roundEnd',
+    round: room.round,
+    winnerId: killer.id,
+    loserId: victim.id,
+    winnerScore: killer.score,
+    nextRoundIn: ROUND_END_MS,
+    players: [...room.players.values()].map(serializePlayer)
+  });
+
+  clearRoomTimer(room);
+
+  room.roundTimer = setTimeout(() => {
+    const currentRoom = rooms.get(room.code);
+
+    if (!currentRoom || currentRoom.players.size !== MAX_PLAYERS) {
+      return;
+    }
+
+    startRound(currentRoom, 'elimination');
+  }, ROUND_END_MS);
+}
+
+function joinRoom(ws, roomCode, name) {
+  const room = rooms.get(roomCode);
+
+  if (!room) {
+    safeSend(ws, { type: 'error', message: 'ROOM_NOT_FOUND' });
+    return;
+  }
+
+  if (room.players.size >= MAX_PLAYERS) {
+    safeSend(ws, { type: 'error', message: 'ROOM_FULL' });
+    return;
+  }
+
+  const slot = getFreeSlot(room);
+  const player = createPlayer(ws, slot, name);
+
+  room.players.set(player.id, player);
+  clients.set(ws, { roomCode, playerId: player.id });
+
+  safeSend(ws, {
+    type: 'joined',
+    roomCode,
+    phase: room.phase,
+    round: room.round,
+    you: serializePlayer(player),
+    players: [...room.players.values()].map(serializePlayer)
+  });
 
   broadcast(
     room,
-    {
-      type: "state",
-      player: playerSnapshot(player)
-    },
+    { type: 'playerJoined', player: serializePlayer(player) },
     player.id
   );
-}
 
-function handleShot(socket, message) {
-  const result = getRoomBySocket(socket);
-
-  if (!result) return;
-
-  const { room, player } = result;
-
-  if (!player.alive) {
-    return;
-  }
-
-  const targetId = String(
-    message.targetId || ""
-  );
-
-  const zone =
-    message.zone === "head"
-      ? "head"
-      : "body";
-
-  const target =
-    room.players.get(targetId);
-
-  if (!target) {
-    broadcast(
-      room,
-      {
-        type: "shot",
-        playerId: player.id,
-        hit: false
-      },
-      player.id
-    );
-
-    return;
-  }
-
-  if (
-    target.id === player.id ||
-    !target.alive
-  ) {
-    return;
-  }
-
-  const damage =
-    zone === "head"
-      ? 100
-      : 34;
-
-  target.hp -= damage;
-
-  if (target.hp < 0) {
-    target.hp = 0;
-  }
-
-  send(player.socket, {
-    type: "hitConfirmed",
-    targetId: target.id,
-    zone,
-    damage,
-    targetHp: target.hp
-  });
-
-  broadcast(room, {
-    type: "damage",
-    targetId: target.id,
-    attackerId: player.id,
-    zone,
-    damage,
-    hp: target.hp
-  });
-
-
-
-  if (target.hp <= 0) {
-    target.alive = false;
-
-    target.deaths += 1;
-    player.kills += 1;
-    player.score += 1;
+  if (room.players.size === MAX_PLAYERS) {
+    room.phase = 'ready';
 
     broadcast(room, {
-      type: "kill",
-    respawnAt: Date.now() + 2500,
-      killerId: player.id,
-      victimId: target.id,
-      killerScore: player.score,
-      killerKills: player.kills,
-      victimDeaths: target.deaths
+      type: 'roomReady',
+      players: [...room.players.values()].map(serializePlayer)
+    });
+  }
+}
+
+function leaveRoom(ws) {
+  const meta = clients.get(ws);
+
+  if (!meta) {
+    return;
+  }
+
+  const room = rooms.get(meta.roomCode);
+
+  if (room) {
+    const player = room.players.get(meta.playerId);
+
+    room.players.delete(meta.playerId);
+    clearRoomTimer(room);
+    room.phase = 'waiting';
+    room.startedAt = 0;
+
+    for (const remainingPlayer of room.players.values()) {
+      remainingPlayer.ready = false;
+      resetPlayer(remainingPlayer);
+    }
+
+    broadcast(room, {
+      type: 'playerLeft',
+      playerId: meta.playerId,
+      name: player?.name || 'Opponent'
     });
 
-    broadcastRoomState(room);
+    if (room.players.size === 0) {
+      rooms.delete(meta.roomCode);
+    }
+  }
 
-    setTimeout(() => {
-      if (!room.players.has(target.id)) {
+  clients.delete(ws);
+}
+
+function getContext(ws) {
+  const meta = clients.get(ws);
+
+  if (!meta) {
+    return null;
+  }
+
+  const room = rooms.get(meta.roomCode);
+  const player = room?.players.get(meta.playerId);
+
+  if (!room || !player) {
+    return null;
+  }
+
+  return { meta, room, player };
+}
+
+wss.on('connection', ws => {
+  ws.isAlive = true;
+
+  safeSend(ws, {
+    type: 'hello',
+    serverTime: Date.now(),
+    version: 2
+  });
+
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+
+  ws.on('message', raw => {
+    let msg;
+
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      safeSend(ws, { type: 'error', message: 'INVALID_JSON' });
+      return;
+    }
+
+    if (!msg || typeof msg.type !== 'string') {
+      return;
+    }
+
+    if (msg.type === 'createRoom') {
+      if (clients.has(ws)) {
+        leaveRoom(ws);
+      }
+
+      const room = createRoom();
+      joinRoom(ws, room.code, msg.name);
+      return;
+    }
+
+    if (msg.type === 'joinRoom') {
+      if (clients.has(ws)) {
+        leaveRoom(ws);
+      }
+
+      const roomCode = String(msg.roomCode || '').trim().toUpperCase();
+      joinRoom(ws, roomCode, msg.name);
+      return;
+    }
+
+    const context = getContext(ws);
+
+    if (!context) {
+      return;
+    }
+
+    const { room, player } = context;
+    player.lastSeenAt = Date.now();
+
+    if (msg.type === 'ready') {
+      player.ready = true;
+
+      broadcast(room, {
+        type: 'readyState',
+        players: [...room.players.values()].map(serializePlayer)
+      });
+
+      if (
+        room.phase === 'ready' &&
+        room.players.size === MAX_PLAYERS &&
+        [...room.players.values()].every(item => item.ready)
+      ) {
+        startRound(room, 'matchStart');
+      }
+
+      return;
+    }
+
+    if (msg.type === 'state') {
+      const now = Date.now();
+
+      if (now - player.lastStateAt < 25) {
         return;
       }
 
-      resetPlayer(target);
+      player.lastStateAt = now;
 
-      const spawn =
-        target.slot === 1
-          ? {
-              x: -7,
-              y: 0,
-              z: 8
-            }
-          : {
-              x: 7,
-              y: 0,
-              z: -58
-            };
+      const numberKeys = ['x', 'y', 'z', 'yaw', 'pitch', 'velocityX', 'velocityZ'];
 
-      target.state.x = spawn.x;
-      target.state.y = spawn.y;
-      target.state.z = spawn.z;
-
-      target.state.yaw = target.slot === 1 ? 0 : Math.PI;
-      broadcast(room, {
-        type: "respawn",
-        player: playerSnapshot(target)
-      });
-
-      broadcastRoomState(room);
-    }, 2500);
-  } else {
-    broadcastRoomState(room);
-  }
-}
-
-function handlePing(socket, message) {
-  send(socket, {
-    type: "pong",
-    clientTime: message.clientTime || message.time || Date.now()
-  });
-}
-
-wss.on("connection", socket => {
-  send(socket, {
-    type: "connected",
-    message: "TACTICAL_CQB_SERVER_READY"
-  });
-
-  socket.on("message", raw => {
-    let message;
-
-    try {
-      message = JSON.parse(
-        raw.toString()
-      );
-    } catch {
-      send(socket, {
-        type: "error",
-        message: "INVALID_JSON"
-      });
-
-      return;
-    }
-
-    switch (message.type) {
-      case "createRoom":
-        handleCreateRoom(socket, message);
-        break;
-
-      case "joinRoom":
-        handleJoinRoom(
-          socket,
-          message
-        );
-        break;
-
-      case "state":
-      case "playerState":
-        handlePlayerState(
-          socket,
-          message
-        );
-        break;
-
-      case "footstep": {
-        const result = getRoomBySocket(socket);
-        if (result && result.player.alive) {
-          const now = Date.now();
-          if (now - (result.player.lastStepAt || 0) >= 120) {
-            result.player.lastStepAt = now;
-            const { x, z } = result.player.state;
-            broadcast(result.room, { type: "footstep", playerId: result.player.id,
-              position: { x, y: 0, z }, sprinting: Boolean(message.sprinting) }, result.player.id);
-          }
-        }
-        break;
+      if (!numberKeys.every(key => Number.isFinite(Number(msg[key])))) {
+        return;
       }
-      case "shoot":
-      case "hit":
-      case "shot":
-        handleShot(
-          socket,
-          message
-        );
-        break;
 
-      case "ping":
-        handlePing(
-          socket,
-          message
-        );
-        break;
+      player.x = Math.max(-23.2, Math.min(23.2, Number(msg.x)));
+      player.y = Math.max(1.0, Math.min(1.85, Number(msg.y)));
+      player.z = Math.max(-68.5, Math.min(33.5, Number(msg.z)));
+      player.yaw = Number(msg.yaw);
+      player.pitch = Math.max(-1.4, Math.min(1.4, Number(msg.pitch)));
+      player.velocityX = Math.max(-9, Math.min(9, Number(msg.velocityX)));
+      player.velocityZ = Math.max(-9, Math.min(9, Number(msg.velocityZ)));
+      player.aiming = Boolean(msg.aiming);
+      player.crouched = Boolean(msg.crouched);
+      player.sprinting = Boolean(msg.sprinting);
+      player.moving = Boolean(msg.moving);
 
-      default:
-        send(socket, {
-          type: "error",
-          message: "UNKNOWN_MESSAGE_TYPE"
-        });
-    }
-  });
+      broadcast(
+        room,
+        {
+          type: 'state',
+          player: serializePlayer(player),
+          serverTime: now
+        },
+        player.id
+      );
 
-  socket.on("close", () => {
-    const result =
-      getRoomBySocket(socket);
-
-    if (!result) {
       return;
     }
 
-    const {
-      room,
-      player
-    } = result;
+    if (msg.type === 'shoot') {
+      if (room.phase !== 'live' || !player.alive) {
+        return;
+      }
 
-    removePlayerFromRoom(
-      room,
-      player.id
-    );
+      const now = Date.now();
+
+      if (now - player.lastShotAt < 70) {
+        return;
+      }
+
+      player.lastShotAt = now;
+
+      broadcast(
+        room,
+        {
+          type: 'shot',
+          playerId: player.id,
+          serverTime: now
+        },
+        player.id
+      );
+
+      return;
+    }
+
+    if (msg.type === 'hit') {
+      if (room.phase !== 'live' || !player.alive) {
+        return;
+      }
+
+      // A reported hit must closely follow a legal shot.
+      if (Date.now() - player.lastShotAt > 260) {
+        return;
+      }
+
+      const target = room.players.get(String(msg.targetId || ''));
+
+      if (!target || target.id === player.id || !target.alive) {
+        return;
+      }
+
+      const zone = msg.zone === 'head' ? 'head' : 'body';
+      const damage = zone === 'head' ? HEAD_DAMAGE : BODY_DAMAGE;
+
+      target.hp = Math.max(0, target.hp - damage);
+
+      safeSend(player.ws, {
+        type: 'hitConfirmed',
+        targetId: target.id,
+        zone,
+        damage,
+        targetHp: target.hp
+      });
+
+      broadcast(room, {
+        type: 'damage',
+        targetId: target.id,
+        attackerId: player.id,
+        zone,
+        damage,
+        hp: target.hp
+      });
+
+      if (target.hp <= 0) {
+        endRound(room, player, target);
+      }
+
+      return;
+    }
+
+    if (msg.type === 'ping') {
+      safeSend(ws, {
+        type: 'pong',
+        clientTime: msg.clientTime,
+        serverTime: Date.now()
+      });
+    }
   });
 
-  socket.on("error", error => {
-    console.error(
-      "WebSocket error:",
-      error.message
-    );
-  });
+  ws.on('close', () => leaveRoom(ws));
+  ws.on('error', () => leaveRoom(ws));
 });
 
-server.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `Tactical CQB multiplayer server running on port ${PORT}`
-    );
+const maintenanceInterval = setInterval(() => {
+  const now = Date.now();
+
+  for (const client of wss.clients) {
+    if (client.isAlive === false) {
+      client.terminate();
+      continue;
+    }
+
+    client.isAlive = false;
+    client.ping();
   }
-);
+
+  for (const [roomCode, room] of rooms) {
+    if (room.players.size === 0 || now - room.createdAt > MAX_ROOM_AGE_MS) {
+      clearRoomTimer(room);
+      rooms.delete(roomCode);
+    }
+  }
+}, 30000);
+
+maintenanceInterval.unref();
+
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Tactical CQB multiplayer v2 running on port ${PORT}`);
+});
