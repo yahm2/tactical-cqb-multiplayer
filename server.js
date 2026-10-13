@@ -133,9 +133,18 @@ function getRoomBySocket(socket) {
   return null;
 }
 
-function createPlayer(socket, slot) {
+function playerSnapshot(player) {
+  return {
+    id: player.id, name: player.name, slot: player.slot,
+    hp: player.hp, score: player.score, alive: player.alive,
+    ...player.state
+  };
+}
+
+function createPlayer(socket, slot, name = "Operator") {
   return {
     id: createId(),
+    name: String(name || "Operator").trim().slice(0, 32) || "Operator",
     socket,
     slot,
     hp: 100,
@@ -144,10 +153,10 @@ function createPlayer(socket, slot) {
     deaths: 0,
     alive: true,
     state: {
-      x: 0,
+      x: slot === 1 ? -7 : 7,
       y: 0,
-      z: 0,
-      yaw: 0,
+      z: slot === 1 ? 8 : -58,
+      yaw: slot === 1 ? 0 : Math.PI,
       pitch: 0,
       aiming: false,
       crouched: false,
@@ -180,7 +189,8 @@ function removePlayerFromRoom(room, playerId) {
   broadcastRoomState(room);
 }
 
-function handleCreateRoom(socket) {
+function handleCreateRoom(socket, message) {
+  if (getRoomBySocket(socket)) return;
   const code = getUniqueRoomCode();
 
   const room = {
@@ -191,7 +201,8 @@ function handleCreateRoom(socket) {
 
   const player = createPlayer(
     socket,
-    1
+    1,
+    message.name
   );
 
   room.players.set(
@@ -205,18 +216,19 @@ function handleCreateRoom(socket) {
   );
 
   send(socket, {
-    type: "roomCreated",
-    code,
-    playerId: player.id,
-    slot: player.slot
+    type: "joined",
+    roomCode: code,
+    you: playerSnapshot(player),
+    players: [...room.players.values()].map(playerSnapshot)
   });
 
   broadcastRoomState(room);
 }
 
 function handleJoinRoom(socket, message) {
+  if (getRoomBySocket(socket)) return;
   const code = String(
-    message.code || ""
+    message.roomCode || message.code || ""
   )
     .trim()
     .toUpperCase();
@@ -241,14 +253,12 @@ function handleJoinRoom(socket, message) {
     return;
   }
 
-  const slot =
-    room.players.size === 0
-      ? 1
-      : 2;
+  const slot = [...room.players.values()].some(p => p.slot === 1) ? 2 : 1;
 
   const player = createPlayer(
     socket,
-    slot
+    slot,
+    message.name
   );
 
   room.players.set(
@@ -257,23 +267,23 @@ function handleJoinRoom(socket, message) {
   );
 
   send(socket, {
-    type: "roomJoined",
-    code,
-    playerId: player.id,
-    slot
+    type: "joined",
+    roomCode: code,
+    you: playerSnapshot(player),
+    players: [...room.players.values()].map(playerSnapshot)
   });
 
   broadcast(room, {
     type: "playerJoined",
-    playerId: player.id,
-    slot
-  });
+    player: playerSnapshot(player)
+  }, player.id);
 
   broadcastRoomState(room);
 
   if (room.players.size === 2) {
     broadcast(room, {
-      type: "matchReady"
+      type: "matchCountdown",
+    startAt: Date.now() + 3000
     });
   }
 }
@@ -289,7 +299,7 @@ function handlePlayerState(socket, message) {
     return;
   }
 
-  const state = message.state || {};
+  const state = message.state || message;
 
   player.state = {
     x: Number(state.x) || 0,
@@ -309,9 +319,8 @@ function handlePlayerState(socket, message) {
   broadcast(
     room,
     {
-      type: "playerState",
-      playerId: player.id,
-      state: player.state
+      type: "state",
+      player: playerSnapshot(player)
     },
     player.id
   );
@@ -380,8 +389,9 @@ function handleShot(socket, message) {
     targetHp: target.hp
   });
 
-  send(target.socket, {
-    type: "tookDamage",
+  broadcast(room, {
+    type: "damage",
+    targetId: target.id,
     attackerId: player.id,
     zone,
     damage,
@@ -404,7 +414,7 @@ function handleShot(socket, message) {
     player.score += 1;
 
     broadcast(room, {
-      type: "playerKilled",
+      type: "kill",
       killerId: player.id,
       victimId: target.id,
       killerScore: player.score,
@@ -438,16 +448,10 @@ function handleShot(socket, message) {
       target.state.y = spawn.y;
       target.state.z = spawn.z;
 
-      send(target.socket, {
-        type: "respawn",
-        hp: target.hp,
-        spawn
-      });
-
+      target.state.yaw = target.slot === 1 ? 0 : Math.PI;
       broadcast(room, {
-        type: "playerRespawned",
-        playerId: target.id,
-        spawn
+        type: "respawn",
+        player: playerSnapshot(target)
       });
 
       broadcastRoomState(room);
@@ -460,7 +464,7 @@ function handleShot(socket, message) {
 function handlePing(socket, message) {
   send(socket, {
     type: "pong",
-    time: message.time || Date.now()
+    clientTime: message.clientTime || message.time || Date.now()
   });
 }
 
@@ -488,7 +492,7 @@ wss.on("connection", socket => {
 
     switch (message.type) {
       case "createRoom":
-        handleCreateRoom(socket);
+        handleCreateRoom(socket, message);
         break;
 
       case "joinRoom":
@@ -498,6 +502,7 @@ wss.on("connection", socket => {
         );
         break;
 
+      case "state":
       case "playerState":
         handlePlayerState(
           socket,
@@ -505,6 +510,8 @@ wss.on("connection", socket => {
         );
         break;
 
+      case "shoot":
+      case "hit":
       case "shot":
         handleShot(
           socket,
