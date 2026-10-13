@@ -1,0 +1,16 @@
+{
+  "name": "tactical-cqb-multiplayer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "ws": "^8.22.0"
+  }
+}
