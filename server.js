@@ -1,6 +1,7 @@
 import express from 'express';
 import http from 'http';
 import crypto from 'crypto';
+import {MAX_HP,WEAPONS,BOUNDS} from './public/gameplay.js';
 import { WebSocketServer, WebSocket } from 'ws';
 
 const app = express();
@@ -15,8 +16,7 @@ const clients = new Map();
 const MAX_PLAYERS = 2;
 const ROUND_END_MS = 2200;
 const ROUND_COUNTDOWN_MS = 3200;
-const BODY_DAMAGE = 34;
-const HEAD_DAMAGE = 100;
+
 const MAX_ROOM_AGE_MS = 12 * 60 * 60 * 1000;
 
 // The outdoor industrial map runs from approximately z=34 to z=-70.
@@ -28,6 +28,7 @@ const SPAWNS = [
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
+    version: 3,
     rooms: rooms.size,
     clients: wss.clients.size,
     uptimeSeconds: Math.floor(process.uptime())
@@ -79,6 +80,9 @@ function serializePlayer(player) {
     name: player.name,
     x: player.x,
     y: player.y,
+    feetY: player.feetY,
+    grounded: player.grounded,
+    weapon: player.weapon,
     z: player.z,
     yaw: player.yaw,
     pitch: player.pitch,
@@ -117,13 +121,14 @@ function resetPlayer(player) {
   player.z = spawn.z;
   player.yaw = spawn.yaw;
   player.pitch = 0;
+  player.feetY = 0;player.grounded = true;player.weapon = 'rifle';player.lastShotWeapon = 'rifle';player.shotConsumed = true;
   player.aiming = false;
   player.crouched = false;
   player.sprinting = false;
   player.moving = false;
   player.velocityX = 0;
   player.velocityZ = 0;
-  player.hp = 100;
+  player.hp = MAX_HP;
   player.alive = true;
   player.lastShotAt = 0;
 }
@@ -145,7 +150,7 @@ function createPlayer(ws, slot, name = 'Operator') {
     moving: false,
     velocityX: 0,
     velocityZ: 0,
-    hp: 100,
+    hp: MAX_HP,
     score: 0,
     alive: true,
     ready: false,
@@ -359,7 +364,7 @@ wss.on('connection', ws => {
   safeSend(ws, {
     type: 'hello',
     serverTime: Date.now(),
-    version: 2
+    version: 3
   });
 
   ws.on('pong', () => {
@@ -443,9 +448,12 @@ wss.on('connection', ws => {
         return;
       }
 
-      player.x = Math.max(-23.2, Math.min(23.2, Number(msg.x)));
-      player.y = Math.max(1.0, Math.min(1.85, Number(msg.y)));
-      player.z = Math.max(-68.5, Math.min(33.5, Number(msg.z)));
+      player.x = Math.max(BOUNDS.minX, Math.min(BOUNDS.maxX, Number(msg.x)));
+      player.feetY = Math.max(0,Math.min(5.5,Number(msg.feetY)||0));
+      player.y = player.feetY + Math.max(1.0,Math.min(1.85,Number(msg.y)-player.feetY));
+      player.grounded = msg.grounded !== false;
+      player.weapon = msg.weapon === 'pistol' ? 'pistol' : 'rifle';
+      player.z = Math.max(BOUNDS.minZ, Math.min(BOUNDS.maxZ, Number(msg.z)));
       player.yaw = Number(msg.yaw);
       player.pitch = Math.max(-1.4, Math.min(1.4, Number(msg.pitch)));
       player.velocityX = Math.max(-9, Math.min(9, Number(msg.velocityX)));
@@ -475,16 +483,19 @@ wss.on('connection', ws => {
 
       const now = Date.now();
 
-      if (now - player.lastShotAt < 70) {
+      const weapon=msg.weapon==='pistol'?'pistol':'rifle';
+      if (now - player.lastShotAt < WEAPONS[weapon].interval - 8) {
         return;
       }
 
       player.lastShotAt = now;
+      player.lastShotWeapon = weapon;player.weapon = weapon;player.shotConsumed = false;
 
       broadcast(
         room,
         {
           type: 'shot',
+          weapon,
           playerId: player.id,
           serverTime: now
         },
@@ -500,7 +511,7 @@ wss.on('connection', ws => {
       }
 
       // A reported hit must closely follow a legal shot.
-      if (Date.now() - player.lastShotAt > 260) {
+      if (player.shotConsumed || Date.now() - player.lastShotAt > 260) {
         return;
       }
 
@@ -511,7 +522,9 @@ wss.on('connection', ws => {
       }
 
       const zone = msg.zone === 'head' ? 'head' : 'body';
-      const damage = zone === 'head' ? HEAD_DAMAGE : BODY_DAMAGE;
+      const config=WEAPONS[player.lastShotWeapon];
+      const damage = zone === 'head' ? config.head : config.body;
+      player.shotConsumed = true;
 
       target.hp = Math.max(0, target.hp - damage);
 
@@ -578,5 +591,5 @@ maintenanceInterval.unref();
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Tactical CQB multiplayer v2 running on port ${PORT}`);
+  console.log(`Tactical CQB multiplayer v3 running on port ${PORT}`);
 });

@@ -25,7 +25,7 @@ export class GameAudio {
     if(position){panner=c.createPanner();panner.panningModel='HRTF';panner.distanceModel='inverse';panner.refDistance=3;panner.maxDistance=80;panner.rolloffFactor=1.3;panner.positionX.value=position.x;panner.positionY.value=position.y??1;panner.positionZ.value=position.z;gain.connect(panner);output=panner;}
     output.connect(this.mix);output.connect(this.room);src.onended=()=>{src.disconnect();gain.disconnect();panner?.disconnect();};src.start();
   }
-  shot(position=null){this.events.shot++;this.play(`rifle-${1+Math.floor(Math.random()*3)}`,position?1.0:.82,position,.96+Math.random()*.08);}
-  step(position=null,sprinting=false){this.events.step++;this.play(`step-${1+Math.floor(Math.random()*3)}`,position?.8:(sprinting?.43:.32),position,.94+Math.random()*.13);}
+  shot(position=null,weapon='rifle'){this.events.shot++;this.play(`rifle-${1+Math.floor(Math.random()*3)}`,position?1.0:.82,position,(weapon==='pistol'?1.35:.96)+Math.random()*.08);}
+  step(position=null,sprinting=false,surface='concrete'){this.events.step++;this.play(`step-${1+Math.floor(Math.random()*3)}`,position?.8:(sprinting?.43:.32),position,(surface==='metal'?1.12:.94)+Math.random()*.13);}
   click(){if(!this.context||this.context.state!=='running'||this.muted)return;const c=this.context,o=c.createOscillator(),g=c.createGain();o.type='triangle';o.frequency.setValueAtTime(280,c.currentTime);o.frequency.exponentialRampToValueAtTime(90,c.currentTime+.04);g.gain.setValueAtTime(.09,c.currentTime);g.gain.exponentialRampToValueAtTime(.001,c.currentTime+.05);o.connect(g);g.connect(this.mix);o.start();o.stop(c.currentTime+.05);o.onended=()=>{o.disconnect();g.disconnect();};}
 }
